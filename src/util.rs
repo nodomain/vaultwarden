@@ -8,7 +8,7 @@ use std::{
 
 use rocket::{
     fairing::{Fairing, Info, Kind},
-    http::{ContentType, Header, HeaderMap, Method, Status},
+    http::{ContentType, Cookie, CookieJar, Header, HeaderMap, Method, SameSite, Status},
     request::FromParam,
     response::{self, Responder},
     Data, Orbit, Request, Response, Rocket,
@@ -44,7 +44,7 @@ impl Fairing for AppHeaders {
         // Do not send the Content-Security-Policy (CSP) Header and X-Frame-Options for the *-connector.html files.
         // This can cause issues when some MFA requests needs to open a popup or page within the clients like WebAuthn, or Duo.
         // This is the same behaviour as upstream Bitwarden.
-        if !req_uri_path.ends_with("connector.html") {
+        if !req_uri_path.contains("connector.html") {
             // # Frame Ancestors:
             // Chrome Web Store: https://chrome.google.com/webstore/detail/bitwarden-free-password-m/nngceckbapebfimnlniiiahkandclblb
             // Edge Add-ons: https://microsoftedge.microsoft.com/addons/detail/bitwarden-free-password/jbkfoedolllekgbhcbcoahefnbanhhlh?hl=en-US
@@ -93,9 +93,11 @@ impl Fairing for AppHeaders {
             res.remove_header("X-Frame-Options");
         }
 
-        // Disable cache unless otherwise specified
-        if !res.headers().contains("cache-control") {
-            res.set_raw_header("Cache-Control", "no-cache, no-store, max-age=0");
+        if !req_uri_path.contains("sso") {
+            // Disable cache unless otherwise specified
+            if !res.headers().contains("cache-control") {
+                res.set_raw_header("Cache-Control", "no-cache, no-store, max-age=0");
+            }
         }
     }
 }
@@ -115,8 +117,9 @@ impl Cors {
     fn get_allowed_origin(headers: &HeaderMap<'_>) -> Option<String> {
         let origin = Cors::get_header(headers, "Origin");
         let domain_origin = CONFIG.domain_origin();
+        let sso_origin = CONFIG.sso_authority();
         let safari_extension_origin = "file://";
-        if origin == domain_origin || origin == safari_extension_origin {
+        if origin == domain_origin || origin == safari_extension_origin || origin == sso_origin {
             Some(origin)
         } else {
             None
@@ -238,6 +241,33 @@ impl<'r> FromParam<'r> for SafeString {
         } else {
             Err(())
         }
+    }
+}
+
+pub struct CustomRedirect {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+impl<'r> rocket::response::Responder<'r, 'static> for CustomRedirect {
+    fn respond_to(self, _: &rocket::request::Request<'_>) -> rocket::response::Result<'static> {
+        let mut response = Response::build()
+            .status(rocket::http::Status {
+                code: 307,
+            })
+            .raw_header("Location", self.url)
+            .header(ContentType::HTML)
+            .finalize();
+
+        //Normal headers
+        response.set_raw_header("Referrer-Policy", "same-origin");
+        response.set_raw_header("X-XSS-Protection", "0");
+
+        for header in &self.headers {
+            response.set_raw_header(header.0.clone(), header.1.clone());
+        }
+
+        Ok(response)
     }
 }
 
@@ -736,5 +766,31 @@ pub fn convert_json_key_lcase_first(src_json: Value) -> Value {
         }
 
         value => value,
+    }
+}
+
+pub struct CookieManager<'a> {
+    jar: &'a CookieJar<'a>,
+}
+
+impl<'a> CookieManager<'a> {
+    pub fn new(jar: &'a CookieJar<'a>) -> Self {
+        Self {
+            jar,
+        }
+    }
+
+    pub fn set_cookie(&self, name: String, value: String) {
+        let cookie = Cookie::build(name, value).same_site(SameSite::Lax).finish();
+
+        self.jar.add(cookie)
+    }
+
+    pub fn get_cookie(&self, name: String) -> Option<String> {
+        self.jar.get(&name).map(|c| c.value().to_string())
+    }
+
+    pub fn delete_cookie(&self, name: String) {
+        self.jar.remove(Cookie::named(name));
     }
 }
