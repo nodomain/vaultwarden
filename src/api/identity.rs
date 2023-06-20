@@ -236,7 +236,7 @@ async fn _authorization_login(
                     let mut result = json!({
                         "access_token": access_token,
                         "token_type": "Bearer",
-                        "refresh_token": refresh_token,
+                        "refresh_token": device.refresh_token,
                         "expires_in": expires_in,
                         "Key": user.akey,
                         "PrivateKey": user.private_key,
@@ -960,10 +960,9 @@ async fn get_auth_code_access_token(code: &str) -> Result<(String, String, CoreU
         Ok(client) => match client.exchange_code(oidc_code).request_async(async_http_client).await {
             Ok(token_response) => {
                 //let refresh_token = token_response.refresh_token():
-                let refresh_token: Option<String> = Some(token_response.refresh_token().unwrap().secret().to_string());
-                let refreshtoken = match refresh_token {
-                    Some(token) => token,
-                    None => String::new(),
+                let refreshtoken = match token_response.refresh_token() {
+                    Some(token) => token.secret().to_string(),
+                    None => String::new()
                 };
                 let id_token = token_response.extra_fields().id_token().unwrap().to_string();
 
