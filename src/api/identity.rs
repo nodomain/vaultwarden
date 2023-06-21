@@ -842,8 +842,8 @@ async fn prevalidate(domainHint: String, conn: DbConn) -> JsonResult {
 }
 
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType, CoreUserInfoClaims};
-use openidconnect::reqwest::http_client;
 use openidconnect::reqwest::async_http_client;
+use openidconnect::reqwest::http_client;
 use openidconnect::OAuth2TokenResponse;
 use openidconnect::{
     AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, RedirectUrl, Scope,
@@ -964,11 +964,15 @@ async fn get_auth_code_access_token(code: &str) -> Result<(String, String, CoreU
                 //let refresh_token = token_response.refresh_token():
                 let refreshtoken = match token_response.refresh_token() {
                     Some(token) => token.secret().to_string(),
-                    None => String::new()
+                    None => String::new(),
                 };
                 let id_token = token_response.extra_fields().id_token().unwrap().to_string();
 
-                let userinfo: CoreUserInfoClaims = client.user_info(token_response.access_token().to_owned(), None).unwrap().request(http_client).unwrap();
+                let userinfo: CoreUserInfoClaims = client
+                                    .user_info(token_response.access_token().to_owned(), None)
+                                    .unwrap()
+                                    .request(http_client)
+                                    .unwrap();
 
                 Ok((refreshtoken, id_token, userinfo))
             }

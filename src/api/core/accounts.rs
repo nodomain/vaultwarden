@@ -260,6 +260,9 @@ async fn post_set_password(data: JsonUpcase<SetPasswordData>, headers: Headers, 
     let routes = vec!["revision_date"];
     let routes: Option<Vec<String>> = Some(routes.iter().map(ToString::to_string).collect());
 
+    user.client_kdf_memory = data.KdfMemory;
+    user.client_kdf_parallelism = data.KdfParallelism;
+
     user.set_password(&data.MasterPasswordHash, Some(data.Key), false, routes);
     user.password_hint = password_hint;
 
