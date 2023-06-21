@@ -969,10 +969,10 @@ async fn get_auth_code_access_token(code: &str) -> Result<(String, String, CoreU
                 let id_token = token_response.extra_fields().id_token().unwrap().to_string();
 
                 let userinfo: CoreUserInfoClaims = client
-                                    .user_info(token_response.access_token().to_owned(), None)
-                                    .unwrap()
-                                    .request(http_client)
-                                    .unwrap();
+                    .user_info(token_response.access_token().to_owned(), None)
+                    .unwrap()
+                    .request(http_client)
+                    .unwrap();
 
                 Ok((refreshtoken, id_token, userinfo))
             }
