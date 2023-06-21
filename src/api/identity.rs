@@ -243,7 +243,7 @@ async fn _authorization_login(
                         "Kdf": user.client_kdf_type,
                         "KdfIterations": user.client_kdf_iter,
                         "KdfMemory": user.client_kdf_memory,
-                        "KdfParallelism": user.client_kdf_parallelism,+-*8
+                        "KdfParallelism": user.client_kdf_parallelism,
                         "ResetMasterPassword": user.password_hash.is_empty(),
                         // "forcePasswordReset": false,
                         // "keyConnectorUrl": false,
