@@ -309,7 +309,7 @@ async fn get_user_collections(headers: Headers, mut conn: DbConn) -> Json<Value>
 #[get("/organizations/<_identifier>/auto-enroll-status")]
 fn get_auto_enroll_status(_identifier: String) -> JsonResult {
     Ok(Json(json!({
-        "ResetPasswordEnabled": false,
+        "ResetPasswordEnabled": false, //Not Implemented.
     })))
 }
 
@@ -823,6 +823,7 @@ async fn get_org_users(
         "ContinuationToken": null,
     }))
 }
+
 #[post("/organizations/<org_id>/keys", data = "<data>")]
 async fn post_org_keys(
     org_id: &str,

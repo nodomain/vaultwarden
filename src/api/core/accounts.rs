@@ -84,6 +84,8 @@ pub struct RegisterData {
 pub struct SetPasswordData {
     Kdf: Option<i32>,
     KdfIterations: Option<i32>,
+    KdfMemory: Option<i32>,
+    KdfParallelism: Option<i32>,
     Key: String,
     Keys: Option<KeysData>,
     MasterPasswordHash: String,

@@ -242,6 +242,8 @@ async fn _authorization_login(
                         "PrivateKey": user.private_key,
                         "Kdf": user.client_kdf_type,
                         "KdfIterations": user.client_kdf_iter,
+                        "KdfMemory": user.client_kdf_memory,
+                        "KdfParallelism": user.client_kdf_parallelism,
                         "ResetMasterPassword": user.password_hash.is_empty(),
                         // "forcePasswordReset": false,
                         // "keyConnectorUrl": false,
@@ -280,6 +282,10 @@ async fn _password_login(
 
     // Ratelimit the login
     crate::ratelimit::check_limit_login(&ip.ip)?;
+
+    if CONFIG.sso_enabled() && CONFIG.sso_only() {
+        err!("SSO sign-in is required");
+    }
 
     // Get the user
     let username = data.username.as_ref().unwrap().trim();
@@ -342,10 +348,6 @@ async fn _password_login(
                 event: EventType::UserFailedLogIn
             }
         )
-    }
-
-    if CONFIG.sso_enabled() && CONFIG.sso_only() {
-        err!("SSO sign-in is required");
     }
 
     let now = Utc::now().naive_utc();

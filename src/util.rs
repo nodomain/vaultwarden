@@ -93,11 +93,9 @@ impl Fairing for AppHeaders {
             res.remove_header("X-Frame-Options");
         }
 
-        if !req_uri_path.contains("sso") {
-            // Disable cache unless otherwise specified
-            if !res.headers().contains("cache-control") {
-                res.set_raw_header("Cache-Control", "no-cache, no-store, max-age=0");
-            }
+        // Disable cache unless otherwise specified
+        if !res.headers().contains("cache-control") {
+            res.set_raw_header("Cache-Control", "no-cache, no-store, max-age=0");
         }
     }
 }
