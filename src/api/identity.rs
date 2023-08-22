@@ -220,7 +220,7 @@ async fn _authorization_login(
                     }
 
                     if CONFIG.sso_acceptall_invites() {
-                        for mut user_org in UserOrganization::find_invited_by_user(&user.uuid, conn).await.iter_mut() {
+                        for user_org in UserOrganization::find_invited_by_user(&user.uuid, conn).await.iter_mut() {
                             user_org.status = UserOrgStatus::Accepted as i32;
                             user_org.save(conn).await?;
                         }
@@ -826,19 +826,12 @@ fn _check_is_some<T>(value: &Option<T>, msg: &str) -> EmptyResult {
 
 #[get("/account/prevalidate?<domainHint>")]
 #[allow(non_snake_case)]
-async fn prevalidate(domainHint: String, conn: DbConn) -> JsonResult {
-    match Organization::find_by_identifier(&domainHint, &conn).await {
-        Some(org) => {
-            let claims = generate_ssotoken_claims(org.uuid, domainHint);
-            let ssotoken = encode_jwt(&claims);
-            Ok(Json(json!({
-                "token": ssotoken,
-            })))
-        }
-        None => Ok(Json(json!({
-            "token": "",
-        }))),
-    }
+async fn prevalidate(domainHint: String) -> JsonResult {
+    let claims = generate_ssotoken_claims(domainHint);
+    let ssotoken = encode_jwt(&claims);
+    Ok(Json(json!({
+        "token": ssotoken,
+    })))
 }
 
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType, CoreUserInfoClaims};

@@ -301,13 +301,13 @@ pub struct SsoTokenJwtClaims {
     pub domainhint: String,
 }
 
-pub fn generate_ssotoken_claims(org_id: String, domainhint: String) -> SsoTokenJwtClaims {
+pub fn generate_ssotoken_claims(domainhint: String) -> SsoTokenJwtClaims {
     let time_now = Utc::now().naive_utc();
     SsoTokenJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + Duration::minutes(2)).timestamp(),
         iss: JWT_SSOTOKEN_ISSUER.to_string(),
-        sub: org_id,
+        sub: "vaultwarden".to_string(),
         domainhint,
     }
 }

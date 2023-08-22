@@ -314,15 +314,6 @@ impl Organization {
         }}
     }
 
-    pub async fn find_by_identifier(_identifer: &str, conn: &DbConn) -> Option<Self> {
-        db_run! { conn: {
-            organizations::table
-                //.filter(organizations::identifer.eq(_identifer))
-                .first::<OrganizationDb>(conn)
-                .ok().from_db()
-        }}
-    }
-
     pub async fn get_all(conn: &mut DbConn) -> Vec<Self> {
         db_run! { conn: {
             organizations::table.load::<OrganizationDb>(conn).expect("Error loading organizations").from_db()
