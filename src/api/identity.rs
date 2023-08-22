@@ -824,10 +824,10 @@ fn _check_is_some<T>(value: &Option<T>, msg: &str) -> EmptyResult {
     Ok(())
 }
 
-#[get("/account/prevalidate?<domainHint>")]
+#[get("/account/prevalidate")]
 #[allow(non_snake_case)]
-async fn prevalidate(domainHint: String) -> JsonResult {
-    let claims = generate_ssotoken_claims(domainHint);
+async fn prevalidate() -> JsonResult {
+    let claims = generate_ssotoken_claims();
     let ssotoken = encode_jwt(&claims);
     Ok(Json(json!({
         "token": ssotoken,
