@@ -97,6 +97,7 @@ pub fn routes() -> Vec<Route> {
         api_key,
         rotate_api_key,
         get_auto_enroll_status,
+        sso_details,
     ]
 }
 
@@ -3006,4 +3007,16 @@ async fn rotate_api_key(
     conn: DbConn,
 ) -> JsonResult {
     _api_key(org_id, data, true, headers, conn).await
+}
+
+// Endpoint called when the user select SSO login (body: `{ "email": "" }`).
+// Returning a Domain/Organization here allow to prefill it and prevent prompting the user
+// VaultWarden sso login is not linked to Org so we set a dummy value.
+#[post("/organizations/domain/sso/details")]
+async fn sso_details() -> JsonResult {
+    Ok(Json(json!({
+      "DomainName": "VaultWarden",
+      "OrganizationIdentifier": "VaultWarden",
+      "SsoAvailable": CONFIG.sso_enabled(),
+    })))
 }
