@@ -172,7 +172,6 @@ async fn _authorization_login(
         .unwrap()
         .claims;
 
-    // let expiry = token.exp;
     let nonce = token.nonce;
     let mut new_user = false;
 
@@ -180,7 +179,6 @@ async fn _authorization_login(
         Some(sso_nonce) => {
             match sso_nonce.delete(conn).await {
                 Ok(_) => {
-                    // let expiry = token.exp;
                     let user_email = match token.email {
                         Some(email) => email,
                         None => userinfo.email().unwrap().to_owned().to_string(),
@@ -205,7 +203,7 @@ async fn _authorization_login(
 
                     let (mut device, new_device) = get_device(&data, conn, &user).await;
 
-                    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, conn).await?;
+                    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, true, conn).await?;
 
                     if CONFIG.mail_enabled() && new_device {
                         if let Err(e) =
@@ -386,7 +384,7 @@ async fn _password_login(
 
     let (mut device, new_device) = get_device(&data, conn, &user).await;
 
-    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, conn).await?;
+    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, false, conn).await?;
 
     if CONFIG.mail_enabled() && new_device {
         if let Err(e) = mail::send_new_device_logged_in(&user.email, &ip.ip.to_string(), &now, &device.name).await {
@@ -597,6 +595,7 @@ async fn twofactor_auth(
     data: &ConnectData,
     device: &mut Device,
     ip: &ClientIp,
+    is_sso: bool,
     conn: &mut DbConn,
 ) -> ApiResult<Option<String>> {
     let twofactors = TwoFactor::find_by_user(user_uuid, conn).await;
@@ -613,7 +612,17 @@ async fn twofactor_auth(
 
     let twofactor_code = match data.two_factor_token {
         Some(ref code) => code,
-        None => err_json!(_json_err_twofactor(&twofactor_ids, user_uuid, conn).await?, "2FA token not provided"),
+        None => {
+            if is_sso {
+                if CONFIG.sso_only() {
+                    err!("2FA not supported with SSO login, contact your administrator");
+                } else {
+                    err!("2FA not supported with SSO login, log directly using email/Master Password");
+                }
+            } else {
+                err_json!(_json_err_twofactor(&twofactor_ids, user_uuid, conn).await?, "2FA token not provided");
+            }
+        }
     };
 
     let selected_twofactor = twofactors.into_iter().find(|tf| tf.atype == selected_id && tf.enabled);
