@@ -1113,7 +1113,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "wasi 0.11.0+wasi-snapshot-preview1",
+ "wasi",
  "wasm-bindgen",
 ]
 
@@ -1318,15 +1318,16 @@ dependencies = [
 
 [[package]]
 name = "hyper-rustls"
-version = "0.23.2"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788965e61b367cd03a62950836d5cd41560c3577d90e40e0819373194d1661c"
+checksum = "8d78e1e73ec14cf7375674f74d7dde185c8206fd9dea6fb6295e8a98098aaa97"
 dependencies = [
+ "futures-util",
  "http",
  "hyper",
- "rustls 0.20.8",
+ "rustls",
  "tokio",
- "tokio-rustls 0.23.4",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -1904,6 +1905,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "oauth2"
+version = "4.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09a6e2a2b13a56ebeabba9142f911745be6456163fd6c3d361274ebcd891a80c"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "getrandom",
+ "http",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "object"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2470,14 +2491,14 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
- "rustls 0.20.8",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls 0.23.4",
+ "tokio-rustls",
  "tokio-socks",
  "tokio-util",
  "tower-service",
@@ -2487,6 +2508,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots",
  "winreg 0.10.1",
 ]
 
@@ -2606,7 +2628,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "ref-cast",
- "rustls 0.21.0",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "smallvec",
@@ -2614,7 +2636,7 @@ dependencies = [
  "state",
  "time",
  "tokio",
- "tokio-rustls 0.24.0",
+ "tokio-rustls",
  "uncased",
 ]
 
@@ -2850,6 +2872,25 @@ checksum = "076066c5f1078eac5b722a31827a8832fe108bed65dfa75e233c89f8206e976c"
 dependencies = [
  "itoa",
  "ryu",
+ "serde",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4beec8bce849d58d06238cb50db2e1c417cfeafa4c63f692b15c82b7c80f8335"
+dependencies = [
+ "itoa",
+ "serde",
+]
+
+[[package]]
+name = "serde_plain"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6018081315db179d0ce57b1fe4b62a12a0028c9cf9bbef868c9cf477b3c34ae"
+dependencies = [
  "serde",
 ]
 
@@ -3230,7 +3271,7 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c28327cf380ac148141087fbfb9de9d7bd4e84ab5d2c28fbc911d753de8a7081"
 dependencies = [
- "rustls 0.21.0",
+ "rustls",
  "tokio",
 ]
 
