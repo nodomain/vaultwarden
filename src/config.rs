@@ -616,8 +616,6 @@ make_config! {
         sso_authority:          String, true,   def,    String::new();
         /// CallBack Path
         sso_callback_path:      String, false,  gen,    |c| generate_sso_callback_path(&c.domain);
-        /// Allow worka around so SSO logins accept all invites
-        sso_acceptall_invites: bool, true,   def,     false;
     },
 
     /// Yubikey settings

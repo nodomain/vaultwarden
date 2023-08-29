@@ -101,13 +101,6 @@ struct KeysData {
     PublicKey: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TokenPayload {
-    exp: i64,
-    email: String,
-    nonce: String,
-}
-
 /// Trims whitespace from password hints, and converts blank password hints to `None`.
 fn clean_password_hint(password_hint: &Option<String>) -> Option<String> {
     match password_hint {
@@ -729,7 +722,6 @@ async fn post_verify_email_token(data: JsonUpcase<VerifyEmailTokenData>, mut con
         Ok(claims) => claims,
         Err(_) => err!("Invalid claim"),
     };
-
     if claims.sub != user.uuid {
         err!("Invalid claim");
     }

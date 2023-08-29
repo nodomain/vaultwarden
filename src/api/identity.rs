@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use jsonwebtoken::DecodingKey;
 use num_traits::FromPrimitive;
 use rocket::serde::json::Json;
@@ -160,10 +160,7 @@ async fn _authorization_login(
     let scope_vec = vec!["api".into(), "offline_access".into()];
     let code = data.code.as_ref().unwrap();
 
-    let (refresh_token, id_token, userinfo) = match get_auth_code_access_token(code).await {
-        Ok((refresh_token, id_token, userinfo)) => (refresh_token, id_token, userinfo),
-        Err(err) => err!(err),
-    };
+    let (refresh_token, id_token, userinfo) = get_auth_code_access_token(code).await?;
 
     let mut validation = jsonwebtoken::Validation::default();
     validation.insecure_disable_signature_validation();
@@ -173,95 +170,36 @@ async fn _authorization_login(
         .claims;
 
     let nonce = token.nonce;
-    let mut new_user = false;
 
-    match SsoNonce::find(&nonce, conn).await {
-        Some(sso_nonce) => {
-            match sso_nonce.delete(conn).await {
-                Ok(_) => {
-                    let user_email = match token.email {
-                        Some(email) => email,
-                        None => userinfo.email().unwrap().to_owned().to_string(),
-                    };
-                    let now = Utc::now().naive_utc();
+    if let Some(sso_nonce) = SsoNonce::find(&nonce, conn).await {
+        match sso_nonce.delete(conn).await {
+            Err(msg) => err!(format!("Failed to delete nonce: {msg}")),
+            Ok(_) => {
+                let now = Utc::now().naive_utc();
 
-                    let mut user = match User::find_by_mail(&user_email, conn).await {
-                        Some(user) => user,
-                        None => {
-                            new_user = true;
-                            User::new(user_email.clone())
-                        }
-                    };
+                let user_email = match token.email {
+                    Some(email) => email,
+                    None => userinfo.email().unwrap().to_owned().to_string(),
+                };
 
-                    if new_user {
-                        user.verified_at = Some(Utc::now().naive_utc());
+                let user = match User::find_by_mail(&user_email, conn).await {
+                    Some(user) => user,
+                    None => {
+                        let mut user = User::new(user_email.clone());
+                        user.verified_at = Some(now);
                         user.save(conn).await?;
+                        user
                     }
+                };
 
-                    // Set the user_uuid here to be passed back used for event logging.
-                    *user_uuid = Some(user.uuid.clone());
+                // Set the user_uuid here to be passed back used for event logging.
+                *user_uuid = Some(user.uuid.clone());
 
-                    let (mut device, new_device) = get_device(&data, conn, &user).await;
-
-                    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, true, conn).await?;
-
-                    if CONFIG.mail_enabled() && new_device {
-                        if let Err(e) =
-                            mail::send_new_device_logged_in(&user.email, &ip.ip.to_string(), &now, &device.name).await
-                        {
-                            error!("Error sending new device email: {:#?}", e);
-
-                            if CONFIG.require_device_email() {
-                                err!("Could not send login notification email. Please contact your administrator.")
-                            }
-                        }
-                    }
-
-                    if CONFIG.sso_acceptall_invites() {
-                        for user_org in UserOrganization::find_invited_by_user(&user.uuid, conn).await.iter_mut() {
-                            user_org.status = UserOrgStatus::Accepted as i32;
-                            user_org.save(conn).await?;
-                        }
-                    }
-
-                    device.refresh_token = refresh_token.clone();
-                    device.save(conn).await?;
-
-                    let orgs = UserOrganization::find_confirmed_by_user(&user.uuid, conn).await;
-                    let (access_token, expires_in) = device.refresh_tokens(&user, orgs, scope_vec);
-                    device.save(conn).await?;
-
-                    let mut result = json!({
-                        "access_token": access_token,
-                        "token_type": "Bearer",
-                        "refresh_token": device.refresh_token,
-                        "expires_in": expires_in,
-                        "Key": user.akey,
-                        "PrivateKey": user.private_key,
-                        "Kdf": user.client_kdf_type,
-                        "KdfIterations": user.client_kdf_iter,
-                        "KdfMemory": user.client_kdf_memory,
-                        "KdfParallelism": user.client_kdf_parallelism,
-                        "ResetMasterPassword": user.password_hash.is_empty(),
-                        // "forcePasswordReset": false,
-                        // "keyConnectorUrl": false,
-                        "scope": scope,
-                        "unofficialServer": true,
-                    });
-
-                    if let Some(token) = twofactor_token {
-                        result["TwoFactorToken"] = Value::String(token);
-                    }
-
-                    info!("User {} logged in successfully. IP: {}", user.email, ip.ip);
-                    Ok(Json(result))
-                }
-                Err(_) => err!("Failed to delete nonce"),
+                common_auth(true, &data, scope, scope_vec, &user, Some(refresh_token), &now, conn, ip).await
             }
         }
-        None => {
-            err!("Invalid nonce")
-        }
+    } else {
+        err!("Invalid nonce")
     }
 }
 
@@ -382,12 +320,26 @@ async fn _password_login(
         )
     }
 
+    common_auth(false, &data, scope, scope_vec, &user, None, &now, conn, ip).await
+}
+
+async fn common_auth(
+    sso_login: bool,
+    data: &ConnectData,
+    scope: &String,
+    scope_vec: Vec<String>,
+    user: &User,
+    refresh_token: Option<String>,
+    now: &NaiveDateTime,
+    conn: &mut DbConn,
+    ip: &ClientIp,
+) -> JsonResult {
     let (mut device, new_device) = get_device(&data, conn, &user).await;
 
-    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, false, conn).await?;
+    let twofactor_token = twofactor_auth(&user.uuid, &data, &mut device, ip, sso_login, conn).await?;
 
     if CONFIG.mail_enabled() && new_device {
-        if let Err(e) = mail::send_new_device_logged_in(&user.email, &ip.ip.to_string(), &now, &device.name).await {
+        if let Err(e) = mail::send_new_device_logged_in(&user.email, &ip.ip.to_string(), now, &device.name).await {
             error!("Error sending new device email: {:#?}", e);
 
             if CONFIG.require_device_email() {
@@ -401,7 +353,10 @@ async fn _password_login(
         }
     }
 
-    // Common
+    if let Some(rt) = refresh_token {
+        device.refresh_token = rt;
+    }
+
     let orgs = UserOrganization::find_confirmed_by_user(&user.uuid, conn).await;
     let (access_token, expires_in) = device.refresh_tokens(&user, orgs, scope_vec);
     device.save(conn).await?;
@@ -413,13 +368,11 @@ async fn _password_login(
         "refresh_token": device.refresh_token,
         "Key": user.akey,
         "PrivateKey": user.private_key,
-        //"TwoFactorToken": "11122233333444555666777888999"
-
         "Kdf": user.client_kdf_type,
         "KdfIterations": user.client_kdf_iter,
         "KdfMemory": user.client_kdf_memory,
         "KdfParallelism": user.client_kdf_parallelism,
-        "ResetMasterPassword": false,// TODO: Same as above
+        "ResetMasterPassword": user.password_hash.is_empty(),
         "scope": scope,
         "unofficialServer": true,
     });
@@ -428,7 +381,7 @@ async fn _password_login(
         result["TwoFactorToken"] = Value::String(token);
     }
 
-    info!("User {} logged in successfully. IP: {}", username, ip.ip);
+    info!("User {} logged in successfully. IP: {}", user.email, ip.ip);
     Ok(Json(result))
 }
 
@@ -851,33 +804,41 @@ use openidconnect::{
     AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, RedirectUrl, Scope,
 };
 
-async fn get_client_from_sso_config() -> Result<CoreClient, &'static str> {
-    let redirect = CONFIG.sso_callback_path();
+async fn get_client_from_sso_config() -> ApiResult<CoreClient> {
     let client_id = ClientId::new(CONFIG.sso_client_id());
     let client_secret = ClientSecret::new(CONFIG.sso_client_secret());
-    let issuer_url = IssuerUrl::new(CONFIG.sso_authority()).or(Err("invalid issuer URL"))?;
+
+    let issuer_url = match IssuerUrl::new(CONFIG.sso_authority()) {
+        Err(err) => err!(format!("Invalid issuer URL: {err}")),
+        Ok(issuer_url) => issuer_url,
+    };
+
+    let redirect = match RedirectUrl::new(CONFIG.sso_callback_path()) {
+        Err(err) => err!(format!("Invalid redirect URL: {err}")),
+        Ok(redirect_url) => redirect_url,
+    };
 
     //TODO: This comparison will fail if one URI has a trailing slash and the other one does not.
     // Should we remove trailing slashes when saving? Or when checking?
     let provider_metadata = match CoreProviderMetadata::discover_async(issuer_url, async_http_client).await {
+        Err(_err) => err!("Failed to discover OpenID provider"),
         Ok(metadata) => metadata,
-        Err(_err) => {
-            return Err("Failed to discover OpenID provider");
-        }
     };
 
-    let client = CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret))
-        .set_redirect_uri(RedirectUrl::new(redirect).or(Err("Invalid redirect URL"))?);
-
-    Ok(client)
+    Ok(CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret)).set_redirect_uri(redirect))
 }
 
 #[get("/connect/oidc-signin?<code>")]
 fn oidcsignin(code: String, jar: &CookieJar<'_>, _conn: DbConn) -> ApiResult<CustomRedirect> {
     let cookiemanager = CookieManager::new(jar);
+    let redirect_uri = cookiemanager
+        .get_cookie("redirect_uri".to_string())
+        .unwrap_or(format!("{}/sso-connector.html", CONFIG.domain()));
 
-    let redirect_uri = cookiemanager.get_cookie("redirect_uri".to_string()).unwrap();
-    let orig_state = cookiemanager.get_cookie("state".to_string()).unwrap();
+    let orig_state = match cookiemanager.get_cookie("state".to_string()) {
+        None => err!("Missing state cookie"),
+        Some(orig_state) => orig_state,
+    };
 
     cookiemanager.delete_cookie("redirect_uri".to_string());
     cookiemanager.delete_cookie("state".to_string());
@@ -929,57 +890,51 @@ struct AuthorizeData {
 #[get("/connect/authorize?<data..>")]
 async fn authorize(data: AuthorizeData, jar: &CookieJar<'_>, mut conn: DbConn) -> ApiResult<CustomRedirect> {
     let cookiemanager = CookieManager::new(jar);
-    match get_client_from_sso_config().await {
-        Ok(client) => {
-            let (auth_url, _csrf_state, nonce) = client
-                .authorize_url(
-                    AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
-                    CsrfToken::new_random,
-                    Nonce::new_random,
-                )
-                .add_scope(Scope::new("email".to_string()))
-                .add_scope(Scope::new("profile".to_string()))
-                .url();
+    let client = get_client_from_sso_config().await?;
 
-            let sso_nonce = SsoNonce::new(nonce.secret().to_string());
-            sso_nonce.save(&mut conn).await?;
+    let (auth_url, _csrf_state, nonce) = client
+        .authorize_url(
+            AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
+        )
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .url();
 
-            cookiemanager.set_cookie("redirect_uri".to_string(), data.redirect_uri.unwrap());
-            cookiemanager.set_cookie("state".to_string(), data.state.unwrap());
+    let sso_nonce = SsoNonce::new(nonce.secret().to_string());
+    sso_nonce.save(&mut conn).await?;
 
-            let redirect = CustomRedirect {
-                url: format!("{}", auth_url),
-                headers: vec![],
-            };
+    cookiemanager.set_cookie("redirect_uri".to_string(), data.redirect_uri.unwrap());
+    cookiemanager.set_cookie("state".to_string(), data.state.unwrap());
 
-            Ok(redirect)
-        }
-        Err(err) => err!("Unable to find client from identifier {}", err),
-    }
+    let redirect = CustomRedirect {
+        url: format!("{}", auth_url),
+        headers: vec![],
+    };
+
+    Ok(redirect)
 }
 
-async fn get_auth_code_access_token(code: &str) -> Result<(String, String, CoreUserInfoClaims), &'static str> {
+async fn get_auth_code_access_token(code: &str) -> ApiResult<(String, String, CoreUserInfoClaims)> {
     let oidc_code = AuthorizationCode::new(String::from(code));
-    match get_client_from_sso_config().await {
-        Ok(client) => match client.exchange_code(oidc_code).request_async(async_http_client).await {
-            Ok(token_response) => {
-                //let refresh_token = token_response.refresh_token():
-                let refreshtoken = match token_response.refresh_token() {
-                    Some(token) => token.secret().to_string(),
-                    None => String::new(),
-                };
-                let id_token = token_response.extra_fields().id_token().unwrap().to_string();
+    let client = get_client_from_sso_config().await?;
 
-                let userinfo: CoreUserInfoClaims = client
-                    .user_info(token_response.access_token().to_owned(), None)
-                    .unwrap()
-                    .request(http_client)
-                    .unwrap();
+    match client.exchange_code(oidc_code).request_async(async_http_client).await {
+        Ok(token_response) => {
+            let refreshtoken = token_response.refresh_token().map_or(String::new(), |token| token.secret().to_string());
+            let id_token = token_response.extra_fields().id_token().unwrap().to_string();
 
-                Ok((refreshtoken, id_token, userinfo))
+            let endpoint = match client.user_info(token_response.access_token().to_owned(), None) {
+                Err(err) => err!(format!("No user info endpoint: {err}")),
+                Ok(endpoint) => endpoint,
+            };
+
+            match endpoint.request(http_client) {
+                Err(err) => err!(format!("Failed requesting user info: {err}")),
+                Ok(userinfo) => Ok((refreshtoken, id_token, userinfo)),
             }
-            Err(_err) => Err("Failed to contact token endpoint"),
-        },
-        Err(_err) => Err("unable to find client"),
+        }
+        Err(_err) => err!("Failed to contact token endpoint"),
     }
 }
