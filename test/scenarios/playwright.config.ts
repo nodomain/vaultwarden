@@ -21,6 +21,7 @@ export default defineConfig({
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: 'html',
   timeout: 10 * 1000,
+  expect: { timeout: 10 * 1000 },
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Base URL to use in actions like `await page.goto('/')`. */
@@ -36,13 +37,5 @@ export default defineConfig({
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
     },
-  ],
-
-  /* Run your local dev server before starting the tests */
-  webServer: {
-      command: 'cd ../oidc && docker-compose --profile VaultWarden up --force-recreate -V',
-      url: 'http://127.0.0.1:8080/realms/test',
-      reuseExistingServer: !process.env.CI,
-      timeout: 300 * 1000
-  }
+  ]
 });
