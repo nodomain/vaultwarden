@@ -8,12 +8,14 @@ use once_cell::sync::Lazy;
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType, CoreUserInfoClaims};
 use openidconnect::reqwest::async_http_client;
 use openidconnect::{
-    AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, Nonce, OAuth2TokenResponse, Scope,
+    AccessToken, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IdToken, Nonce,
+    OAuth2TokenResponse, Scope,
 };
 
 use crate::{
     api::ApiResult,
-    db::{models::SsoNonce, DbConn},
+    db::models::{EventType, SsoNonce},
+    db::DbConn,
     CONFIG,
 };
 
@@ -24,7 +26,7 @@ static AC_CACHE: Lazy<Cache<String, AuthenticatedUser>> =
 
 static CLIENT_CACHE: RwLock<Option<CoreClient>> = RwLock::new(None);
 
-static SSO_JWT_VALIDATION: Lazy<(DecodingKey, Validation)> = Lazy::new(prepare_decoding);
+static SSO_JWT_VALIDATION: Lazy<Decoding> = Lazy::new(prepare_decoding);
 
 // Will Panic if SSO is activated and a key file is present but we can't decode its content
 pub fn load_lazy() {
@@ -80,23 +82,73 @@ pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TokenPayload {
+struct IdTokenPayload {
     exp: i64,
     email: Option<String>,
     nonce: String,
 }
 
+#[derive(Debug)]
+struct AccessTokenPayload {
+    role: Option<UserRole>,
+}
+
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    User,
+}
+
 #[derive(Clone, Debug)]
-struct AuthenticatedUser {
+pub struct AuthenticatedUser {
     pub nonce: String,
     pub refresh_token: String,
     pub email: String,
     pub user_name: Option<String>,
+    pub role: Option<UserRole>,
+}
+
+impl AuthenticatedUser {
+    pub fn is_admin(&self) -> bool {
+        self.role.as_ref().is_some_and(|x| x == &UserRole::Admin)
+    }
+}
+
+struct Decoding {
+    key: DecodingKey,
+    id_validation: Validation,
+    access_validation: Validation,
+    debug_key: DecodingKey,
+    debug_validation: Validation,
+}
+
+impl Decoding {
+    pub fn new(key: DecodingKey, validation: Validation) -> Self {
+        let mut access_validation = validation.clone();
+        access_validation.validate_aud = false;
+
+        let mut debug_validation = insecure_validation();
+        debug_validation.validate_aud = false;
+
+        Decoding {
+            key,
+            id_validation: validation,
+            access_validation,
+            debug_key: DecodingKey::from_secret(&[]),
+            debug_validation,
+        }
+    }
+
+    pub fn log_decode_debug(&self, token_name: &str, token: &str) {
+        let _ = jsonwebtoken::decode::<serde_json::Value>(token, &self.debug_key, &self.debug_validation)
+            .map(|payload| debug!("Token {token_name}: {}", payload.claims));
+    }
 }
 
 // DecodingKey and Validation used to read the SSO JWT token response
 // If there is no key fallback to reading without validation
-fn prepare_decoding() -> (DecodingKey, Validation) {
+fn prepare_decoding() -> Decoding {
     let maybe_key = CONFIG.sso_enabled().then_some(()).and_then(|_| match std::fs::read(CONFIG.sso_key_filepath()) {
         Ok(key) => Some(DecodingKey::from_rsa_pem(&key).unwrap_or_else(|e| {
             panic!(
@@ -122,22 +174,127 @@ fn prepare_decoding() -> (DecodingKey, Validation) {
             validation.set_audience(&[CONFIG.sso_client_id()]);
             validation.set_issuer(&[CONFIG.sso_authority()]);
 
-            (key, validation)
+            Decoding::new(key, validation)
         }
-        None => {
-            let mut validation = jsonwebtoken::Validation::default();
-            validation.set_audience(&[CONFIG.sso_client_id()]);
-            validation.insecure_disable_signature_validation();
-
-            (DecodingKey::from_secret(&[]), validation)
-        }
+        None => Decoding::new(DecodingKey::from_secret(&[]), insecure_validation()),
     }
+}
+
+fn insecure_validation() -> Validation {
+    let mut validation = jsonwebtoken::Validation::default();
+    validation.set_audience(&[CONFIG.sso_client_id()]);
+    validation.insecure_disable_signature_validation();
+
+    validation
 }
 
 #[derive(Clone, Debug)]
 pub struct UserInformation {
     pub email: String,
     pub user_name: Option<String>,
+}
+
+fn decode_id_token<
+    AC: openidconnect::AdditionalClaims,
+    GC: openidconnect::GenderClaim,
+    JE: openidconnect::JweContentEncryptionAlgorithm<JT>,
+    JS: openidconnect::JwsSigningAlgorithm<JT>,
+    JT: openidconnect::JsonWebKeyType,
+>(
+    oic_id_token: Option<&IdToken<AC, GC, JE, JS, JT>>,
+) -> ApiResult<IdTokenPayload> {
+    let id_token_str = match oic_id_token {
+        None => err!("Token response did not contain an id_token"),
+        Some(token) => token.to_string(),
+    };
+
+    match jsonwebtoken::decode::<IdTokenPayload>(
+        id_token_str.as_str(),
+        &SSO_JWT_VALIDATION.key,
+        &SSO_JWT_VALIDATION.id_validation,
+    ) {
+        Ok(payload) => Ok(payload.claims),
+        Err(err) => {
+            SSO_JWT_VALIDATION.log_decode_debug("identity_token", id_token_str.as_str());
+            err!(format!("Could not decode id token: {err}"))
+        }
+    }
+}
+
+// Errors are logged but will return None
+fn decode_roles(email: &str, token: &serde_json::Value) -> Option<UserRole> {
+    let roles_path = CONFIG.sso_roles_token_path();
+
+    if let Some(json_roles) = token.pointer(&roles_path) {
+        match serde_json::from_value::<Vec<UserRole>>(json_roles.clone()) {
+            Ok(mut roles) => {
+                roles.sort();
+                roles.into_iter().next()
+            }
+            Err(err) => {
+                debug!("Failed to parse user ({email}) roles: {err}");
+                None
+            }
+        }
+    } else {
+        debug!("No roles in {email} access_token");
+        None
+    }
+}
+
+fn decode_access_token(email: &str, access_token: &AccessToken) -> ApiResult<AccessTokenPayload> {
+    if CONFIG.sso_roles_enabled() {
+        let access_token_str = access_token.secret();
+
+        SSO_JWT_VALIDATION.log_decode_debug("access_token", access_token_str);
+
+        match jsonwebtoken::decode::<serde_json::Value>(
+            access_token_str,
+            &SSO_JWT_VALIDATION.key,
+            &SSO_JWT_VALIDATION.access_validation,
+        ) {
+            Err(err) => err!(format!("Could not decode access token: {:?}", err)),
+            Ok(payload) => {
+                let payload = payload.claims;
+
+                let role = if CONFIG.sso_roles_enabled() {
+                    let role = decode_roles(email, &payload);
+                    if !CONFIG.sso_roles_default_to_user() && role.is_none() {
+                        info!("User {email} failed to login due to missing/invalid role");
+                        err!(
+                            "Invalid user role. Contact your administrator",
+                            ErrorEvent {
+                                event: EventType::UserFailedLogIn
+                            }
+                        )
+                    }
+                    role
+                } else {
+                    None
+                };
+
+                Ok(AccessTokenPayload {
+                    role,
+                })
+            }
+        }
+    } else {
+        Ok(AccessTokenPayload {
+            role: None,
+        })
+    }
+}
+
+async fn retrieve_user_info(client: &CoreClient, access_token: AccessToken) -> ApiResult<CoreUserInfoClaims> {
+    let endpoint = match client.user_info(access_token, None) {
+        Err(err) => err!(format!("No user_info endpoint: {err}")),
+        Ok(endpoint) => endpoint,
+    };
+
+    match endpoint.request_async(async_http_client).await {
+        Err(err) => err!(format!("Request to user_info endpoint failed: {err}")),
+        Ok(user_info) => Ok(user_info),
+    }
 }
 
 // During the 2FA flow we will
@@ -161,28 +318,11 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
             let refresh_token =
                 token_response.refresh_token().map_or(String::new(), |token| token.secret().to_string());
 
-            let id_token = match token_response.extra_fields().id_token() {
-                None => err!("Token response did not contain an id_token"),
-                Some(token) => token.to_string(),
-            };
+            let id_token = decode_id_token(token_response.extra_fields().id_token())?;
+            let user_info = retrieve_user_info(&client, token_response.access_token().to_owned()).await?;
+            let user_name = user_info.preferred_username().map(|un| un.to_string());
 
-            let endpoint = match client.user_info(token_response.access_token().to_owned(), None) {
-                Err(err) => err!(format!("No user_info endpoint: {err}")),
-                Ok(endpoint) => endpoint,
-            };
-
-            let user_info: CoreUserInfoClaims = match endpoint.request_async(async_http_client).await {
-                Err(err) => err!(format!("Request to user_info endpoint failed: {err}")),
-                Ok(user_info) => user_info,
-            };
-
-            let kv_coercion: &(DecodingKey, Validation) = &SSO_JWT_VALIDATION;
-            let token = match jsonwebtoken::decode::<TokenPayload>(id_token.as_str(), &kv_coercion.0, &kv_coercion.1) {
-                Err(err) => err!(format!("Could not decode id token: {err}")),
-                Ok(payload) => payload.claims,
-            };
-
-            let email = match token.email {
+            let email = match id_token.email {
                 Some(email) => email,
                 None => match user_info.email() {
                     None => err!("Neither id token nor userinfo contained an email"),
@@ -190,16 +330,17 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
                 },
             };
 
-            let user_name = user_info.preferred_username().map(|un| un.to_string());
+            let access_token = decode_access_token(&email, token_response.access_token())?;
 
             let authenticated_user = AuthenticatedUser {
-                nonce: token.nonce,
+                nonce: id_token.nonce,
                 refresh_token,
                 email: email.clone(),
                 user_name: user_name.clone(),
+                role: access_token.role,
             };
 
-            AC_CACHE.insert(code.clone(), authenticated_user.clone());
+            AC_CACHE.insert(code.clone(), authenticated_user);
 
             Ok(UserInformation {
                 email,
@@ -211,14 +352,14 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
 }
 
 // User has passed 2FA flow we can delete `nonce` and clear the cache.
-pub async fn redeem(code: &String, conn: &mut DbConn) -> ApiResult<String> {
+pub async fn redeem(code: &String, conn: &mut DbConn) -> ApiResult<AuthenticatedUser> {
     if let Some(au) = AC_CACHE.get(code) {
         AC_CACHE.invalidate(code);
 
         if let Some(sso_nonce) = SsoNonce::find(&au.nonce, conn).await {
             match sso_nonce.delete(conn).await {
                 Err(msg) => err!(format!("Failed to delete nonce: {msg}")),
-                Ok(_) => Ok(au.refresh_token),
+                Ok(_) => Ok(au),
             }
         } else {
             err!("Failed to retrive nonce from db")

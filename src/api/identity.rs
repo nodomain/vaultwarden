@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::{
     api::{
+        admin,
         core::{
             accounts::{PreloginData, RegisterData, _prelogin, _register, kdf_upgrade},
             log_user_event,
@@ -30,7 +31,12 @@ pub fn routes() -> Vec<Route> {
 }
 
 #[post("/connect/token", data = "<data>")]
-async fn login(data: Form<ConnectData>, client_header: ClientHeaders, mut conn: DbConn) -> JsonResult {
+async fn login(
+    data: Form<ConnectData>,
+    client_header: ClientHeaders,
+    cookies: &CookieJar<'_>,
+    mut conn: DbConn,
+) -> JsonResult {
     let data: ConnectData = data.into_inner();
 
     let mut user_uuid: Option<String> = None;
@@ -50,7 +56,7 @@ async fn login(data: Form<ConnectData>, client_header: ClientHeaders, mut conn: 
             _check_is_some(&data.device_name, "device_name cannot be blank")?;
             _check_is_some(&data.device_type, "device_type cannot be blank")?;
 
-            _password_login(data, &mut user_uuid, &mut conn, &client_header.ip).await
+            _password_login(data, &mut user_uuid, &mut conn, cookies, &client_header.ip).await
         }
         "client_credentials" => {
             _check_is_some(&data.client_id, "client_id cannot be blank")?;
@@ -71,7 +77,7 @@ async fn login(data: Form<ConnectData>, client_header: ClientHeaders, mut conn: 
             _check_is_some(&data.device_name, "device_name cannot be blank")?;
             _check_is_some(&data.device_type, "device_type cannot be blank")?;
 
-            _authorization_login(data, &mut user_uuid, &mut conn, &client_header.ip).await
+            _authorization_login(data, &mut user_uuid, &mut conn, cookies, &client_header.ip).await
         }
         t => err!("Invalid type", t),
     };
@@ -159,6 +165,7 @@ async fn _authorization_login(
     data: ConnectData,
     user_uuid: &mut Option<String>,
     conn: &mut DbConn,
+    cookies: &CookieJar<'_>,
     ip: &ClientIp,
 ) -> JsonResult {
     let scope = match data.scope.as_ref() {
@@ -187,7 +194,7 @@ async fn _authorization_login(
         }
     };
 
-    let refresh_token = sso::redeem(code, conn).await?;
+    let au_user = sso::redeem(code, conn).await?;
 
     let now = Utc::now().naive_utc();
     let (user, mut device, new_device, twofactor_token) = match user_data {
@@ -203,16 +210,31 @@ async fn _authorization_login(
         }
     };
 
-    device.refresh_token = refresh_token; // will be saved in authenticated_response
+    let is_admin = au_user.is_admin();
+    device.refresh_token = au_user.refresh_token; // will be saved in authenticated_response
     *user_uuid = Some(user.uuid.clone()); // Set the user_uuid to be passed back used for event logging.
 
-    authenticated_response(scope, scope_vec, &user, &mut device, new_device, twofactor_token, &now, conn, ip).await
+    authenticated_response(
+        scope,
+        scope_vec,
+        &user,
+        is_admin,
+        &mut device,
+        new_device,
+        twofactor_token,
+        &now,
+        conn,
+        cookies,
+        ip,
+    )
+    .await
 }
 
 async fn _password_login(
     data: ConnectData,
     user_uuid: &mut Option<String>,
     conn: &mut DbConn,
+    cookies: &CookieJar<'_>,
     ip: &ClientIp,
 ) -> JsonResult {
     // Validate scope
@@ -322,7 +344,20 @@ async fn _password_login(
 
     let twofactor_token = twofactor_auth(&user, &data, &mut device, ip, conn).await?;
 
-    authenticated_response(scope, scope_vec, &user, &mut device, new_device, twofactor_token, &now, conn, ip).await
+    authenticated_response(
+        scope,
+        scope_vec,
+        &user,
+        false,
+        &mut device,
+        new_device,
+        twofactor_token,
+        &now,
+        conn,
+        cookies,
+        ip,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -330,11 +365,13 @@ async fn authenticated_response(
     scope: &String,
     scope_vec: Vec<String>,
     user: &User,
+    is_admin: bool,
     device: &mut Device,
     new_device: bool,
     twofactor_token: Option<String>,
     now: &NaiveDateTime,
     conn: &mut DbConn,
+    cookies: &CookieJar<'_>,
     ip: &ClientIp,
 ) -> JsonResult {
     if CONFIG.mail_enabled() && new_device {
@@ -365,6 +402,11 @@ async fn authenticated_response(
                 }
             }
         }
+    }
+
+    if is_admin {
+        info!("User {} logged with admin cookie", user.email);
+        cookies.add(admin::create_admin_cookie());
     }
 
     // Common
