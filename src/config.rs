@@ -635,6 +635,12 @@ make_config! {
         sso_key_filepath:               String, false,  auto,   |c| format!("{}/{}", c.data_folder, "sso_key.pub.pem");
         /// Optional sso master password policy
         sso_master_password_policy:     String, false,  option;
+        /// Enable the mapping of roles (user/admin) from the access_token
+        sso_roles_enabled:              bool,   true,   def,    false;
+        /// Missing invalid roles default to user
+        sso_roles_default_to_user:      bool,   true,   def,    true;
+        /// Access token path to read roles
+        sso_roles_token_path:           String, false,  auto,   |c| format!("/resource_access/{}/roles", c.sso_client_id);
     },
 
     /// Yubikey settings
