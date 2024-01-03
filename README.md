@@ -20,6 +20,18 @@ This feature is controlled by the following conf:
 - `SSO_ROLES_DEFAULT_TO_USER`: do not block login in case of missing or invalid roles, default is `true`.
 - `SSO_ROLES_TOKEN_PATH=/resource_access/${SSO_CLIENT_ID}/roles`: path to read roles in the Access token
 
+
+### Group/Organization invitation mapping
+
+Allow to invite user to existing Oganization if they are listed in the Access token.
+
+This feature is controlled by the following conf:
+
+- `SSO_ORGANIZATIONS_INVIT`: control if the mapping is done, default is `false`
+- `SSO_ORGANIZATIONS_SCOPE`: Optional scope to request if needed
+- `SSO_ORGANIZATIONS_TOKEN_PATH`: path to read groups/organization in the Access token
+
+
 ## Docker
 
 Change the docker files to package both front-end from [Timshel/oidc_web_builds](https://github.com/Timshel/oidc_web_builds/releases).
