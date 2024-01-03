@@ -17,10 +17,8 @@ use crate::{
     api::ApiResult,
     auth,
     auth::{AuthMethodScope, TokenWrapper, DEFAULT_REFRESH_VALIDITY},
-    db::{
-        models::{Device, SsoNonce, User},
-        DbConn,
-    },
+    db::models::{Device, EventType, SsoNonce, User},
+    db::DbConn,
     CONFIG,
 };
 
@@ -131,6 +129,18 @@ impl BasicTokenPayload {
     }
 }
 
+#[derive(Debug)]
+struct AccessTokenPayload {
+    role: Option<UserRole>,
+}
+
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    User,
+}
+
 #[derive(Clone, Debug)]
 pub struct AuthenticatedUser {
     pub nonce: String,
@@ -139,6 +149,13 @@ pub struct AuthenticatedUser {
     pub expires_in: Option<Duration>,
     pub email: String,
     pub user_name: Option<String>,
+    pub role: Option<UserRole>,
+}
+
+impl AuthenticatedUser {
+    pub fn is_admin(&self) -> bool {
+        self.role.as_ref().is_some_and(|x| x == &UserRole::Admin)
+    }
 }
 
 struct Decoding {
@@ -166,7 +183,7 @@ impl Decoding {
         }
     }
 
-    pub fn decode_id_token<
+    pub fn id_token<
         AC: openidconnect::AdditionalClaims,
         GC: openidconnect::GenderClaim,
         JE: openidconnect::JweContentEncryptionAlgorithm<JT>,
@@ -184,23 +201,74 @@ impl Decoding {
         match jsonwebtoken::decode::<IdTokenPayload>(id_token_str.as_str(), &self.key, &self.id_validation) {
             Ok(payload) => Ok(payload.claims),
             Err(err) => {
-                self.log_decode_debug("identity_token", id_token_str.as_str());
+                self.log_debug("identity_token", id_token_str.as_str());
                 err!(format!("Could not decode id token: {err}"))
             }
         }
     }
 
-    pub fn decode_basic_token(&self, token_name: &str, token: &str) -> ApiResult<BasicTokenPayload> {
+    // Errors are logged but will return None
+    fn roles(email: &str, token: &serde_json::Value) -> Option<UserRole> {
+        let roles_path = CONFIG.sso_roles_token_path();
+
+        if let Some(json_roles) = token.pointer(&roles_path) {
+            match serde_json::from_value::<Vec<UserRole>>(json_roles.clone()) {
+                Ok(mut roles) => {
+                    roles.sort();
+                    roles.into_iter().next()
+                }
+                Err(err) => {
+                    debug!("Failed to parse user ({email}) roles: {err}");
+                    None
+                }
+            }
+        } else {
+            debug!("No roles in {email} access_token");
+            None
+        }
+    }
+
+    fn access_token(&self, email: &str, access_token: &AccessToken) -> ApiResult<AccessTokenPayload> {
+        let mut role = None;
+
+        if CONFIG.sso_roles_enabled() {
+            let access_token_str = access_token.secret();
+
+            self.log_debug("access_token", access_token_str);
+
+            match jsonwebtoken::decode::<serde_json::Value>(access_token_str, &self.key, &self.access_validation) {
+                Err(err) => err!(format!("Could not decode access token: {:?}", err)),
+                Ok(payload) => {
+                    role = Self::roles(email, &payload.claims);
+                    if !CONFIG.sso_roles_default_to_user() && role.is_none() {
+                        info!("User {email} failed to login due to missing/invalid role");
+                        err!(
+                            "Invalid user role. Contact your administrator",
+                            ErrorEvent {
+                                event: EventType::UserFailedLogIn
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        Ok(AccessTokenPayload {
+            role,
+        })
+    }
+
+    pub fn basic_token(&self, token_name: &str, token: &str) -> ApiResult<BasicTokenPayload> {
         match jsonwebtoken::decode::<BasicTokenPayload>(token, &self.key, &self.access_validation) {
             Ok(payload) => Ok(payload.claims),
             Err(err) => {
-                self.log_decode_debug(token_name, token);
+                self.log_debug(token_name, token);
                 err_silent!(format!("Could not decode {token_name}: {err}"))
             }
         }
     }
 
-    pub fn log_decode_debug(&self, token_name: &str, token: &str) {
+    pub fn log_debug(&self, token_name: &str, token: &str) {
         let _ = jsonwebtoken::decode::<serde_json::Value>(token, &self.debug_key, &self.debug_validation)
             .map(|payload| debug!("Token {token_name}: {}", payload.claims));
     }
@@ -273,8 +341,8 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
     match client.exchange_code(oidc_code).request_async(async_http_client).await {
         Ok(token_response) => {
             let user_info = client.user_info_async(token_response.access_token().to_owned()).await?;
-
-            let id_token = SSO_JWT_VALIDATION.decode_id_token(token_response.extra_fields().id_token())?;
+            let id_token = SSO_JWT_VALIDATION.id_token(token_response.extra_fields().id_token())?;
+            let user_name = user_info.preferred_username().map(|un| un.to_string());
 
             let email = match id_token.email {
                 Some(email) => email,
@@ -284,7 +352,7 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
                 },
             };
 
-            let user_name = user_info.preferred_username().map(|un| un.to_string());
+            let access_token = SSO_JWT_VALIDATION.access_token(&email, token_response.access_token())?;
 
             let refresh_token = token_response.refresh_token().map(|t| t.secret().to_string());
             if refresh_token.is_none() && CONFIG.sso_scopes_vec().contains(&"offline_access".to_string()) {
@@ -298,9 +366,10 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
                 expires_in: token_response.expires_in(),
                 email: email.clone(),
                 user_name: user_name.clone(),
+                role: access_token.role,
             };
 
-            AC_CACHE.insert(code.clone(), authenticated_user.clone());
+            AC_CACHE.insert(code.clone(), authenticated_user);
 
             Ok(UserInformation {
                 email,
@@ -338,7 +407,7 @@ pub fn create_auth_tokens(
     access_token: &str,
     expires_in: Option<Duration>,
 ) -> ApiResult<auth::AuthTokens> {
-    let (ap_nbf, ap_exp) = match (SSO_JWT_VALIDATION.decode_basic_token("access_token", access_token), expires_in) {
+    let (ap_nbf, ap_exp) = match (SSO_JWT_VALIDATION.basic_token("access_token", access_token), expires_in) {
         (Ok(ap), _) => (ap.nbf(), ap.exp),
         (Err(_), Some(exp)) => {
             let time_now = Utc::now().naive_utc();
@@ -359,7 +428,7 @@ fn _create_auth_tokens(
     access_token: &str,
 ) -> ApiResult<auth::AuthTokens> {
     let (nbf, exp, token) = if let Some(rt) = refresh_token.as_ref() {
-        match SSO_JWT_VALIDATION.decode_basic_token("refresh_token", rt) {
+        match SSO_JWT_VALIDATION.basic_token("refresh_token", rt) {
             Err(_) => {
                 let time_now = Utc::now().naive_utc();
                 let exp = (time_now + *DEFAULT_REFRESH_VALIDITY).timestamp();
@@ -427,7 +496,7 @@ pub async fn exchange_refresh_token(
         Some(TokenWrapper::Access(access_token)) => {
             let exp_limit = (Utc::now().naive_utc() + *DEFAULT_BW_EXPIRATION).timestamp();
 
-            match SSO_JWT_VALIDATION.decode_basic_token("access_token", access_token) {
+            match SSO_JWT_VALIDATION.basic_token("access_token", access_token) {
                 Err(err) => err!(format!("Impossible to read access_token: {err}")),
                 Ok(claims) if claims.exp < exp_limit => {
                     err_silent!("Access token is close to expiration but we have no refresh token")

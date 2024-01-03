@@ -22,6 +22,9 @@ The following configurations are available
  - `SSO_CLIENT_SECRET` : Client Secret
  - `SSO_KEY_FILEPATH` : Optional public key to validate the JWT token (without it signature check will not be done).
  - `SSO_MASTER_PASSWORD_POLICY`: Optional Master password policy
+ - `SSO_ROLES_ENABLED`: control if the mapping is done, default is `false`
+ - `SSO_ROLES_DEFAULT_TO_USER`: do not block login in case of missing or invalid roles, default is `true`.
+ - `SSO_ROLES_TOKEN_PATH=/resource_access/${SSO_CLIENT_ID}/roles`: path to read roles in the Access token
 
 The callback url is : `https://your.domain/identity/connect/oidc-signin`
 
