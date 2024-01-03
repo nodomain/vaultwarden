@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
 use url::Url;
@@ -14,15 +15,18 @@ use openidconnect::{
 };
 
 use crate::{
+    api::core::organizations::CollectionData,
     api::ApiResult,
     auth,
-    auth::AuthMethodScope,
-    db::models::{Device, EventType, SsoNonce, User},
+    auth::{AuthMethodScope, ClientIp},
+    business::organization_logic,
+    db::models::{Device, EventType, Organization, SsoNonce, User, UserOrgType, UserOrganization},
     db::DbConn,
     CONFIG,
 };
 
 pub static COOKIE_NAME_REDIRECT: Lazy<String> = Lazy::new(|| "sso_redirect_url".to_string());
+pub static FAKE_IDENTIFIER: Lazy<String> = Lazy::new(|| "VaultWarden".to_string());
 
 static AC_CACHE: Lazy<Cache<String, AuthenticatedUser>> =
     Lazy::new(|| Cache::builder().max_capacity(1000).time_to_live(Duration::from_secs(10 * 60)).build());
@@ -67,6 +71,14 @@ async fn cached_client() -> ApiResult<CoreClient> {
 
 // The `nonce` allow to protect against replay attacks
 pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
+    let mut scopes = vec![Scope::new("email".to_string()), Scope::new("profile".to_string())];
+
+    if CONFIG.sso_organizations_invite() {
+        if let Some(scope) = CONFIG.sso_organizations_scope() {
+            scopes.push(Scope::new(scope));
+        }
+    }
+
     let (auth_url, _csrf_state, nonce) = cached_client()
         .await?
         .authorize_url(
@@ -74,8 +86,7 @@ pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
             || CsrfToken::new(state),
             Nonce::new_random,
         )
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
+        .add_scopes(scopes)
         .url();
 
     let sso_nonce = SsoNonce::new(nonce.secret().to_string());
@@ -107,6 +118,7 @@ impl BasicTokenPayload {
 #[derive(Debug)]
 struct AccessTokenPayload {
     role: Option<UserRole>,
+    groups: Vec<String>,
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
@@ -124,6 +136,7 @@ pub struct AuthenticatedUser {
     pub email: String,
     pub user_name: Option<String>,
     pub role: Option<UserRole>,
+    pub groups: Vec<String>,
 }
 
 impl AuthenticatedUser {
@@ -181,10 +194,46 @@ impl Decoding {
         }
     }
 
+    // Errors are logged but will return None
+    fn roles(email: &str, token: &serde_json::Value) -> Option<UserRole> {
+        if let Some(json_roles) = token.pointer(&CONFIG.sso_roles_token_path()) {
+            match serde_json::from_value::<Vec<UserRole>>(json_roles.clone()) {
+                Ok(mut roles) => {
+                    roles.sort();
+                    roles.into_iter().next()
+                }
+                Err(err) => {
+                    debug!("Failed to parse user ({email}) roles: {err}");
+                    None
+                }
+            }
+        } else {
+            debug!("No roles in {email} access_token");
+            None
+        }
+    }
+
+    // Errors are logged but will return an empty Vec
+    fn groups(email: &str, token: &serde_json::Value) -> Vec<String> {
+        if let Some(json_groups) = token.pointer(&CONFIG.sso_organizations_token_path()) {
+            match serde_json::from_value::<Vec<String>>(json_groups.clone()) {
+                Ok(groups) => groups,
+                Err(err) => {
+                    error!("Failed to parse user ({email}) groups: {err}");
+                    Vec::new()
+                }
+            }
+        } else {
+            debug!("No groups in {email} access_token");
+            Vec::new()
+        }
+    }
+
     fn access_token(&self, email: &str, access_token: &AccessToken) -> ApiResult<AccessTokenPayload> {
         let mut role = None;
+        let mut groups = Vec::new();
 
-        if CONFIG.sso_roles_enabled() {
+        if CONFIG.sso_roles_enabled() && CONFIG.sso_organizations_invite() {
             let access_token_str = access_token.secret();
 
             self.log_debug("access_token", access_token_str);
@@ -192,15 +241,21 @@ impl Decoding {
             match jsonwebtoken::decode::<serde_json::Value>(access_token_str, &self.key, &self.access_validation) {
                 Err(err) => err!(format!("Could not decode access token: {:?}", err)),
                 Ok(payload) => {
-                    role = decode_roles(email, &payload.claims);
-                    if !CONFIG.sso_roles_default_to_user() && role.is_none() {
-                        info!("User {email} failed to login due to missing/invalid role");
-                        err!(
-                            "Invalid user role. Contact your administrator",
-                            ErrorEvent {
-                                event: EventType::UserFailedLogIn
-                            }
-                        )
+                    if CONFIG.sso_roles_enabled() {
+                        role = Self::roles(email, &payload.claims);
+                        if !CONFIG.sso_roles_default_to_user() && role.is_none() {
+                            info!("User {email} failed to login due to missing/invalid role");
+                            err!(
+                                "Invalid user role. Contact your administrator",
+                                ErrorEvent {
+                                    event: EventType::UserFailedLogIn
+                                }
+                            )
+                        }
+                    }
+
+                    if CONFIG.sso_organizations_invite() {
+                        groups = Self::groups(email, &payload.claims);
                     }
                 }
             }
@@ -208,6 +263,7 @@ impl Decoding {
 
         Ok(AccessTokenPayload {
             role,
+            groups,
         })
     }
 
@@ -275,27 +331,6 @@ pub struct UserInformation {
     pub user_name: Option<String>,
 }
 
-// Errors are logged but will return None
-fn decode_roles(email: &str, token: &serde_json::Value) -> Option<UserRole> {
-    let roles_path = CONFIG.sso_roles_token_path();
-
-    if let Some(json_roles) = token.pointer(&roles_path) {
-        match serde_json::from_value::<Vec<UserRole>>(json_roles.clone()) {
-            Ok(mut roles) => {
-                roles.sort();
-                roles.into_iter().next()
-            }
-            Err(err) => {
-                debug!("Failed to parse user ({email}) roles: {err}");
-                None
-            }
-        }
-    } else {
-        debug!("No roles in {email} access_token");
-        None
-    }
-}
-
 async fn retrieve_user_info(client: &CoreClient, access_token: AccessToken) -> ApiResult<CoreUserInfoClaims> {
     let endpoint = match client.user_info(access_token, None) {
         Err(err) => err!(format!("No user_info endpoint: {err}")),
@@ -352,6 +387,7 @@ pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
                 email: email.clone(),
                 user_name: user_name.clone(),
                 role: access_token.role,
+                groups: access_token.groups,
             };
 
             AC_CACHE.insert(code.clone(), authenticated_user);
@@ -441,4 +477,43 @@ pub async fn exchange_refresh_token(
     } else {
         err!("Impossible to retrieve new access token, refresh_token is missing")
     }
+}
+
+pub async fn sync_groups(
+    user: &User,
+    device: &Device,
+    ip: &ClientIp,
+    groups: &Vec<String>,
+    conn: &mut DbConn,
+) -> ApiResult<()> {
+    if CONFIG.sso_organizations_invite() {
+        let db_user_orgs = UserOrganization::find_any_state_by_user(&user.uuid, conn).await;
+        let user_orgs = db_user_orgs.iter().map(|uo| (uo.org_uuid.clone(), uo)).collect::<HashMap<_, _>>();
+
+        let org_groups: Vec<String> = vec![];
+        let org_collections: Vec<CollectionData> = vec![];
+
+        for group in groups {
+            if let Some(org) = Organization::find_by_name(group, conn).await {
+                if user_orgs.get(&org.uuid).is_none() {
+                    info!("Invitation to {} organization sent to {}", group, user.email);
+                    organization_logic::invite(
+                        user,
+                        device,
+                        ip,
+                        &org,
+                        UserOrgType::User,
+                        &org_groups,
+                        true,
+                        &org_collections,
+                        org.billing_email.clone(),
+                        conn,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
