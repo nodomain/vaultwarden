@@ -3,6 +3,7 @@ use num_traits::FromPrimitive;
 use rocket::serde::json::Json;
 use rocket::{
     form::{Form, FromForm},
+    http::CookieJar,
     Route,
 };
 use serde_json::Value;
@@ -209,6 +210,7 @@ async fn _authorization_login(
         }
     };
 
+    sso::sync_groups(&user, &device, ip, &au_user.groups, conn).await?;
     let is_admin = au_user.is_admin();
     device.refresh_token = au_user.refresh_token; // will be saved in authenticated_response
     *user_uuid = Some(user.uuid.clone()); // Set the user_uuid to be passed back used for event logging.
