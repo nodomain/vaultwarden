@@ -59,12 +59,12 @@ async fn cached_client() -> ApiResult<CoreClient> {
 }
 
 // The `nonce` allow to protect against replay attacks
-pub async fn authorize_url(mut conn: DbConn) -> ApiResult<Url> {
+pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
     let (auth_url, _csrf_state, nonce) = cached_client()
         .await?
         .authorize_url(
             AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
-            CsrfToken::new_random,
+            || CsrfToken::new(state),
             Nonce::new_random,
         )
         .add_scope(Scope::new("email".to_string()))
