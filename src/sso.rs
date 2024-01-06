@@ -1,4 +1,5 @@
 use chrono::Utc;
+use rocket::http::CookieJar;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use openidconnect::{
     AccessToken, AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IdToken, Nonce,
     OAuth2TokenResponse, RefreshToken, Scope,
 };
+use regex::Regex;
 
 use crate::{
     api::core::organizations::CollectionData,
@@ -22,6 +24,7 @@ use crate::{
     business::organization_logic,
     db::models::{Device, EventType, Organization, SsoNonce, User, UserOrgType, UserOrganization},
     db::DbConn,
+    util::CustomRedirect,
     CONFIG,
 };
 
@@ -36,6 +39,7 @@ static CLIENT_CACHE: RwLock<Option<CoreClient>> = RwLock::new(None);
 static SSO_JWT_VALIDATION: Lazy<Decoding> = Lazy::new(prepare_decoding);
 
 static DEFAULT_BW_EXPIRATION: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::minutes(5));
+static SSO_ERRORS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^error_(.*)$").unwrap());
 
 // Will Panic if SSO is activated and a key file is present but we can't decode its content
 pub fn pre_load_sso_jwt_validation() {
@@ -236,12 +240,12 @@ impl Decoding {
                 Ok(groups) => groups,
                 Err(err) => {
                     error!("Failed to parse user ({email}) groups: {err}");
-                    Vec::new()
+                    Vec::with_capacity(0)
                 }
             }
         } else {
             debug!("No groups in {email} access_token");
-            Vec::new()
+            Vec::with_capacity(0)
         }
     }
 
@@ -347,12 +351,47 @@ pub struct UserInformation {
     pub user_name: Option<String>,
 }
 
+// Wrap the errors in a JWT token to be able to pass it as an OpenID response `code`
+pub fn wrap_sso_errors(error: String, error_description: Option<String>) -> String {
+    format!("error_{}", auth::generate_sso_error_claims(error, error_description))
+}
+
+// Check if the code is not in fact errors
+fn unwrap_sso_erors(code: &str) -> Option<Result<auth::SSOCodeErrorClaims, crate::error::Error>> {
+    SSO_ERRORS_REGEX.captures(code).and_then(|captures| captures.get(1).map(|ma| auth::decode_sso_error(ma.as_str())))
+}
+
+pub fn format_bitwarden_redirect(code: &str, state: &str, jar: &CookieJar<'_>) -> CustomRedirect {
+    let redirect_uri = jar
+        .get(COOKIE_NAME_REDIRECT)
+        .map(|c| c.value().to_string())
+        .unwrap_or(format!("{}/sso-connector.html", CONFIG.domain()));
+
+    CustomRedirect {
+        url: format!("{}?code={code}&state={state}", redirect_uri),
+        headers: Vec::with_capacity(0),
+    }
+}
+
 // During the 2FA flow we will
 //  - retrieve the user information and then only discover he needs 2FA.
 //  - second time we will rely on the `AC_CACHE` since the `code` has already been exchanged.
 // The `nonce` will ensure that the user is authorized only once.
 // We return only the `UserInformation` to force calling `redeem` to obtain the `refresh_token`.
 pub async fn exchange_code(code: &String) -> ApiResult<UserInformation> {
+    match unwrap_sso_erors(code) {
+        Some(Ok(auth::SSOCodeErrorClaims {
+            error,
+            error_description,
+            ..
+        })) => {
+            let description = error_description.unwrap_or(String::new());
+            err!(format!("Failed to login: {}, {}", error, description))
+        }
+        Some(Err(error)) => err!(format!("Failed to decode SSO error: {error}")),
+        None => (),
+    }
+
     if let Some(authenticated_user) = AC_CACHE.get(code) {
         return Ok(UserInformation {
             email: authenticated_user.email,
@@ -538,8 +577,9 @@ pub async fn sync_groups(
         let db_user_orgs = UserOrganization::find_any_state_by_user(&user.uuid, conn).await;
         let user_orgs = db_user_orgs.iter().map(|uo| (uo.org_uuid.clone(), uo)).collect::<HashMap<_, _>>();
 
-        let org_groups: Vec<String> = vec![];
-        let org_collections: Vec<CollectionData> = vec![];
+        // Only support `access_all=true` for groups/collections
+        let org_groups: Vec<String> = Vec::with_capacity(0);
+        let org_collections: Vec<CollectionData> = Vec::with_capacity(0);
 
         for group in groups {
             if let Some(org) = Organization::find_by_name(group, conn).await {
