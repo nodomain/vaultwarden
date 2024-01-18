@@ -311,6 +311,7 @@ async fn get_user_collections(headers: Headers, mut conn: DbConn) -> Json<Value>
 #[get("/organizations/<_identifier>/auto-enroll-status")]
 fn get_auto_enroll_status(_identifier: &str) -> JsonResult {
     Ok(Json(json!({
+        "Id": "null",
         "ResetPasswordEnabled": false, // Not implemented
     })))
 }
