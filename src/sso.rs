@@ -69,6 +69,8 @@ async fn cached_client() -> ApiResult<CoreClient> {
 
 // The `nonce` allow to protect against replay attacks
 pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
+    let scopes = CONFIG.sso_scopes_vec().into_iter().map(Scope::new);
+
     let (auth_url, _csrf_state, nonce) = cached_client()
         .await?
         .authorize_url(
@@ -76,8 +78,7 @@ pub async fn authorize_url(mut conn: DbConn, state: String) -> ApiResult<Url> {
             || CsrfToken::new(state),
             Nonce::new_random,
         )
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
+        .add_scopes(scopes)
         .url();
 
     let sso_nonce = SsoNonce::new(nonce.secret().to_string());
