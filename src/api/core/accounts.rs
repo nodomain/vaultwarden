@@ -340,14 +340,17 @@ async fn put_avatar(data: JsonUpcase<AvatarData>, headers: Headers, mut conn: Db
 async fn get_public_keys(uuid: &str, _headers: Headers, mut conn: DbConn) -> JsonResult {
     let user = match User::find_by_uuid(uuid, &mut conn).await {
         Some(user) => user,
-        None => err!("User doesn't exist"),
+        None => err_code!("User doesn't exist", Status::NotFound.code),
     };
 
-    Ok(Json(json!({
-        "UserId": user.uuid,
-        "PublicKey": user.public_key,
-        "Object":"userKey"
-    })))
+    match user.public_key {
+        None => err_code!("User has no public_key", Status::NotFound.code),
+        Some(public_key) => Ok(Json(json!({
+            "UserId": user.uuid,
+            "PublicKey": public_key,
+            "Object":"userKey"
+        }))),
+    }
 }
 
 #[post("/accounts/keys", data = "<data>")]
