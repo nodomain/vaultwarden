@@ -643,6 +643,8 @@ make_config! {
         sso_organizations_invite:       bool,   true,   def,    false;
         /// Access token path to read Organization/Groups
         sso_organizations_token_path:   String, true,   def,    "/groups".to_string();
+        /// Deactivate saving the master password
+        sso_experimental_no_master_pwd: bool,   true,   def,    false;
     },
 
     /// Yubikey settings
@@ -853,6 +855,10 @@ fn validate_config(cfg: &ConfigItems) -> Result<(), Error> {
     if cfg.sso_enabled {
         if cfg.sso_client_id.is_empty() || cfg.sso_client_secret.is_empty() || cfg.sso_authority.is_empty() {
             err!("`SSO_CLIENT_ID`, `SSO_CLIENT_SECRET` and `SSO_AUTHORITY` must be set for SSO support")
+        }
+
+        if !cfg.sso_only && cfg.sso_experimental_no_master_pwd {
+            warn!("`sso_only` should be activated when running `sso_experimental_no_master_pwd`")
         }
 
         internal_sso_issuer_url(&cfg.sso_authority)?;
