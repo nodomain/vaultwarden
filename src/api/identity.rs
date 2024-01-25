@@ -791,7 +791,7 @@ fn _check_is_some<T>(value: &Option<T>, msg: &str) -> EmptyResult {
     Ok(())
 }
 
-#[get("/account/prevalidate")]
+#[get("/sso/prevalidate")]
 fn prevalidate() -> JsonResult {
     let claims = auth::generate_ssotoken_claims();
     let sso_token = auth::encode_jwt(&claims);
