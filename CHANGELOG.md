@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.30.2-3
+
+ - Add `SSO_AUTHORIZE_EXTRA_PARAMS` to add extra parameter to the authorize redirection (needed to obtain a `refresh_token` with Google Auth).
+
 ## 1.30.2-2
 
  - Fix non jwt `acess_token` check when there is no `refresh_token`
