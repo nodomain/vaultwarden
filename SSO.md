@@ -21,9 +21,9 @@ The following configurations are available
  - `SSO_AUTHORIZE_EXTRA_PARAMS` : Optional, allow to add extra parameter to the authorize redirection (default `""`)
  - `SSO_CLIENT_ID` : Client Id
  - `SSO_CLIENT_SECRET` : Client Secret
- - `SSO_KEY_FILEPATH` : Optional public key to validate the JWT token (without it signature check will not be done).
  - `SSO_MASTER_PASSWORD_POLICY`: Optional Master password policy
- - `SSO_AUTH_ONLY_NOT_SESSION`: Enable to use SSO only for authentication not session lifecycle.
+ - `SSO_AUTH_ONLY_NOT_SESSION`: Enable to use SSO only for authentication not session lifecycle
+ - `SSO_DEBUG_TOKENS`: Log all tokens for easier debugging (default `false`)
 
 The callback url is : `https://your.domain/identity/connect/oidc-signin`
 

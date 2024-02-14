@@ -629,12 +629,12 @@ make_config! {
         sso_authorize_extra_params:     String, false,  def,    String::new();
         /// CallBack Path
         sso_callback_path:              String, false,  gen,    |c| generate_sso_callback_path(&c.domain);
-        /// Optional sso public key
-        sso_key_filepath:               String, false,  auto,   |c| format!("{}/{}", c.data_folder, "sso_key.pub.pem");
         /// Optional sso master password policy
         sso_master_password_policy:     String, false,  option;
         /// Use sso only for auth not the session lifecycle
         sso_auth_only_not_session:      bool,   true,   def,    false;
+        /// Log all tokens
+        sso_debug_tokens:               bool,   true,   def,    false;
     },
 
     /// Yubikey settings
